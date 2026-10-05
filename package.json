@@ -1,0 +1,26 @@
+{
+  "name": "sauce-demo-storefront-automation",
+  "version": "1.0.0",
+  "description": "Playwright UI automation for the Sauce Demo storefront (Jira SDEMO-1: Catalog -> PDP -> Add to Cart)",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug",
+    "test:smoke": "playwright test --grep @smoke",
+    "test:regression": "playwright test --grep @regression",
+    "test:anomaly": "playwright test --grep @anomaly",
+    "test:data": "playwright test --grep @data-check",
+    "report": "playwright show-report reports/html",
+    "typecheck": "tsc --noEmit",
+    "install:browsers": "playwright install chromium"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@types/node": "^20.14.2",
+    "typescript": "^5.4.5"
+  }
+}
