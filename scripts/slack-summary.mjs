@@ -24,8 +24,19 @@
  *    wording instead of being reported as a product failure.
  */
 import { readFileSync, appendFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const REPORT = process.env.PW_JSON_REPORT ?? 'reports/results.json';
+// Resolved relative to this script's own location, not the caller's CWD, so
+// `node automation/scripts/slack-summary.mjs` works the same whether it's
+// run from the repo root or from inside automation/ - no `cd` required. A
+// qa-reporter skill invocation that did `cd automation && node
+// scripts/slack-summary.mjs` once fell outside its Bash permission
+// allowlist for exactly this reason (the allowlist matches the literal
+// command, which then started with `cd`, not `node`) - this removes the
+// need for the `cd` that caused it.
+const here = dirname(fileURLToPath(import.meta.url));
+const REPORT = process.env.PW_JSON_REPORT ?? resolve(here, '..', 'reports', 'results.json');
 const MAX_LISTED = 8;
 const THROTTLE_HINTS = ['rate-limited POST /cart/add.js', 'too_many_requests', '429'];
 
