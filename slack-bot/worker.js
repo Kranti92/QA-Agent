@@ -1,26 +1,29 @@
 /**
- * Slack -> GitHub Actions relay (Cloudflare Worker).
+ * Slack -> CI relay (Cloudflare Worker). Supports CircleCI and GitHub Actions.
  *
  * Why this exists: a Slack slash command POSTs a form-encoded body with its
- * own signature headers. GitHub's API accepts neither, and the official
- * GitHub Slack app can only *subscribe* to workflow events — it cannot
- * dispatch them. So something has to translate, and it has to be reachable
- * from the internet.
+ * own signature headers. Neither CircleCI's nor GitHub's API accepts that,
+ * and the official GitHub Slack app can only *subscribe* to workflow events —
+ * it cannot dispatch them. So something has to translate, and it has to be
+ * reachable from the internet.
  *
  * Flow:
  *   /qa smoke  ->  verify Slack signature
- *              ->  POST /actions/workflows/qa.yml/dispatches
+ *              ->  trigger the pipeline
  *              ->  reply within 3s so Slack does not show a timeout
- *   ...the workflow itself posts the result later via chat.postMessage.
+ *   ...the pipeline itself posts the result later via chat.postMessage.
  *
  * Secrets (wrangler secret put <NAME>):
  *   SLACK_SIGNING_SECRET  from the Slack app's Basic Information page
- *   GITHUB_TOKEN          fine-grained PAT, repo-scoped, Actions: write
+ *   CIRCLE_TOKEN          CircleCI personal API token   (PROVIDER=circleci)
+ *   GITHUB_TOKEN          fine-grained PAT, Actions: write (PROVIDER=github)
  *
  * Vars (wrangler.toml):
+ *   PROVIDER              circleci | github
+ *   DEFAULT_REF           main
+ *   CIRCLE_PROJECT_SLUG   e.g. gh/Kranti92/QA-Agent
  *   GITHUB_REPO           e.g. Kranti92/QA-Agent
  *   WORKFLOW_FILE         qa.yml
- *   DEFAULT_REF           main
  */
 
 const SUITES = ['smoke', 'regression', 'anomaly', 'data', 'all'];
@@ -51,13 +54,16 @@ export default {
       return ephemeral(error);
     }
 
+    const trigger =
+      (env.PROVIDER ?? 'circleci') === 'github' ? dispatchGitHub : dispatchCircleCI;
+
     try {
-      await dispatchWorkflow(env, { suite, workers, channelId, userName });
+      await trigger(env, { suite, workers, channelId, userName });
     } catch (err) {
       console.log('dispatch failed:', err.message);
       return ephemeral(
         `Could not start the run: ${err.message}\n` +
-          'Check the relay logs and that the workflow file exists on the default branch.',
+          'Check the relay logs, and that the CI config exists on the default branch.',
       );
     }
 
@@ -101,7 +107,45 @@ function parseCommand(text) {
   return { suite, workers: String(workersNum) };
 }
 
-async function dispatchWorkflow(env, { suite, workers, channelId, userName }) {
+/**
+ * CircleCI API v2 pipeline trigger.
+ *
+ * Pipeline parameters must already be declared in .circleci/config.yml or
+ * CircleCI rejects the request — that is the usual cause of a 400 here.
+ */
+async function dispatchCircleCI(env, { suite, workers, channelId, userName }) {
+  const slug = env.CIRCLE_PROJECT_SLUG;
+  if (!slug) throw new Error('CIRCLE_PROJECT_SLUG is not configured');
+
+  const response = await fetch(
+    `https://circleci.com/api/v2/project/${slug}/pipeline`,
+    {
+      method: 'POST',
+      headers: {
+        'Circle-Token': env.CIRCLE_TOKEN,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        branch: env.DEFAULT_REF ?? 'main',
+        parameters: {
+          suite,
+          workers,
+          slack_channel: channelId,
+          triggered_by: userName,
+        },
+      }),
+    },
+  );
+
+  // 201 Created is the success case for a pipeline trigger.
+  if (response.status !== 201) {
+    const body = await response.text();
+    throw new Error(`CircleCI returned ${response.status}: ${body.slice(0, 200)}`);
+  }
+}
+
+async function dispatchGitHub(env, { suite, workers, channelId, userName }) {
   const url =
     `https://api.github.com/repos/${env.GITHUB_REPO}` +
     `/actions/workflows/${env.WORKFLOW_FILE}/dispatches`;

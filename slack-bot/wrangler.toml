@@ -4,6 +4,13 @@ compatibility_date = "2026-01-01"
 
 # Non-secret config. Secrets go in with `wrangler secret put`, never here.
 [vars]
+# circleci | github
+PROVIDER = "circleci"
+DEFAULT_REF = "main"
+
+# CircleCI
+CIRCLE_PROJECT_SLUG = "gh/Kranti92/QA-Agent"
+
+# GitHub Actions (only read when PROVIDER = "github")
 GITHUB_REPO = "Kranti92/QA-Agent"
 WORKFLOW_FILE = "qa.yml"
-DEFAULT_REF = "main"

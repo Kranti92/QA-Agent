@@ -1,0 +1,145 @@
+version: 2.1
+
+# Pipeline parameters. CircleCI only lets these be set through an API trigger,
+# which is how the Slack relay in slack-bot/ drives a run. Pushes and the
+# schedule simply use the defaults.
+parameters:
+  suite:
+    description: Which tagged subset to run
+    type: enum
+    enum: [smoke, regression, anomaly, data, all]
+    default: smoke
+  workers:
+    description: Parallel workers. Keep low — the storefront rate-limits /cart/add.js
+    type: string
+    default: '1'
+  slack_channel:
+    description: Slack channel id to report to (blank falls back to SLACK_DEFAULT_CHANNEL)
+    type: string
+    default: ''
+  triggered_by:
+    description: Slack user who asked for the run
+    type: string
+    default: ''
+
+jobs:
+  test:
+    # Official Playwright image: browsers and system deps are preinstalled.
+    # This tag MUST track the @playwright/test version in package.json —
+    # a mismatch makes Playwright re-download browsers on every run.
+    #   node -p "require('@playwright/test/package.json').version"
+    docker:
+      - image: mcr.microsoft.com/playwright:v1.63.0-noble
+    resource_class: medium
+    working_directory: ~/repo
+
+    environment:
+      BASE_URL: https://sauce-demo.myshopify.com
+      HEADLESS: 'true'
+      RETRIES: '2'
+      # CI runners share outbound IPs, so the storefront throttles sooner here
+      # than on a laptop.
+      WORKERS: << pipeline.parameters.workers >>
+      SUITE: << pipeline.parameters.suite >>
+      SLACK_CHANNEL: << pipeline.parameters.slack_channel >>
+      TRIGGERED_BY: << pipeline.parameters.triggered_by >>
+
+    steps:
+      - checkout
+
+      - restore_cache:
+          keys:
+            - npm-v1-{{ checksum "package-lock.json" }}
+            - npm-v1-
+
+      - run:
+          name: Install dependencies
+          command: npm ci
+
+      - save_cache:
+          key: npm-v1-{{ checksum "package-lock.json" }}
+          paths:
+            - ~/.npm
+
+      - run:
+          name: Typecheck
+          command: npm run typecheck
+
+      - run:
+          name: Run Playwright suite
+          # Never fail the step here: the Slack notification below must run
+          # either way. The real outcome is re-asserted at the end.
+          command: |
+            case "$SUITE" in
+              smoke)      GREP="--grep @smoke" ;;
+              regression) GREP="--grep @regression" ;;
+              anomaly)    GREP="--grep @anomaly" ;;
+              data)       GREP="--grep @data-check" ;;
+              all)        GREP="" ;;
+            esac
+            echo "Running suite '$SUITE' with $WORKERS worker(s)"
+            # Do not pass --reporter here: that REPLACES the reporters
+            # configured in playwright.config.ts, and we need the json one.
+            npx playwright test $GREP || echo "playwright exited non-zero" > /tmp/tests-failed
+          no_output_timeout: 20m
+
+      # Served as individual browsable files, so reports/html/index.html opens
+      # in the browser rather than downloading as a zip.
+      - store_artifacts:
+          path: reports
+          destination: reports
+
+      - store_test_results:
+          path: reports
+
+      - run:
+          name: Notify Slack
+          when: always
+          command: |
+            if [ -z "${SLACK_ACCESS_TOKEN:-}" ]; then
+              echo "SLACK_ACCESS_TOKEN not set — skipping notification."
+              exit 0
+            fi
+
+            node scripts/slack-summary.mjs --payload > /tmp/slack-payload.json
+            cat /tmp/slack-payload.json
+
+            curl -sS -X POST https://slack.com/api/chat.postMessage \
+              -H "Authorization: Bearer ${SLACK_ACCESS_TOKEN}" \
+              -H 'Content-Type: application/json; charset=utf-8' \
+              --data @/tmp/slack-payload.json \
+              -o /tmp/slack-response.json
+
+            # Slack answers 200 with {"ok":false,"error":"..."} on failure, so
+            # the HTTP status alone proves nothing.
+            if ! grep -q '"ok":true' /tmp/slack-response.json; then
+              echo "Slack rejected the message:"
+              cat /tmp/slack-response.json
+              exit 1
+            fi
+            echo "Slack notified."
+
+      - run:
+          name: Reflect test outcome
+          when: always
+          command: |
+            if [ -f /tmp/tests-failed ]; then
+              echo "Playwright reported failures — see the artifacts tab for the HTML report."
+              exit 1
+            fi
+            echo "Suite passed."
+
+workflows:
+  # Runs on every push, and on an API trigger from the Slack relay.
+  #
+  # For a nightly run, add a Scheduled Pipeline in the CircleCI UI
+  # (Project Settings -> Triggers) rather than the old in-config
+  # `triggers: schedule` syntax, which is deprecated and cannot pass pipeline
+  # parameters. A scheduled pipeline can, so the nightly run can set
+  # suite=all while pushes stay on smoke.
+  #
+  # Keep it daily, not hourly: repeated add-to-cart runs trip the
+  # storefront's 429 rate limit.
+  qa:
+    jobs:
+      - test

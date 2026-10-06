@@ -23,18 +23,23 @@ on:
         type: string
         default: ''
 
-  schedule:
-    # Daily, deliberately not hourly: repeated add-to-cart runs trip the
-    # storefront's 429 rate limit.
-    - cron: '0 6 * * *'
-
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'playwright.config.ts'
-      - '.github/workflows/qa.yml'
+  # CircleCI (.circleci/config.yml) is the primary runner — see
+  # slack-bot/README.md. The automatic triggers here are deliberately
+  # disabled so two CI systems do not run the same add-to-cart suite on the
+  # same push: they share nothing but the storefront's 429 rate limit, and
+  # would trip it twice as fast.
+  #
+  # This workflow is kept as a manually dispatchable fallback. Re-enable the
+  # triggers below only if you retire the CircleCI config.
+  #
+  # schedule:
+  #   - cron: '0 6 * * *'
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - 'src/**'
+  #     - 'tests/**'
+  #     - 'playwright.config.ts'
 
 # One run at a time. Concurrent runs share GitHub's egress IPs and would
 # rate-limit each other.
@@ -91,7 +96,7 @@ jobs:
       - name: Build Slack summary
         id: summary
         if: always()
-        run: node scripts/slack-summary.mjs
+        run: node scripts/slack-summary.mjs --outputs
 
       - name: Upload HTML report
         id: report
