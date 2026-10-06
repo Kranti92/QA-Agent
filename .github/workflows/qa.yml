@@ -1,0 +1,156 @@
+name: QA Suite
+
+on:
+  # Triggered from Slack via the relay in slack-bot/ (see its README),
+  # or by hand from the Actions tab.
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Which tagged subset to run
+        type: choice
+        default: smoke
+        options: [smoke, regression, anomaly, data, all]
+      workers:
+        description: Parallel workers (keep low — the store rate-limits /cart/add.js)
+        type: string
+        default: '1'
+      slack_channel:
+        description: Slack channel id to report to (blank = SLACK_DEFAULT_CHANNEL)
+        type: string
+        default: ''
+      triggered_by:
+        description: Slack user who asked for the run
+        type: string
+        default: ''
+
+  schedule:
+    # Daily, deliberately not hourly: repeated add-to-cart runs trip the
+    # storefront's 429 rate limit.
+    - cron: '0 6 * * *'
+
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'playwright.config.ts'
+      - '.github/workflows/qa.yml'
+
+# One run at a time. Concurrent runs share GitHub's egress IPs and would
+# rate-limit each other.
+concurrency:
+  group: qa-suite
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Playwright (${{ inputs.suite || 'smoke' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      BASE_URL: https://sauce-demo.myshopify.com
+      # Hosted runners share outbound IPs, so the storefront throttles sooner
+      # here than it does locally. One worker by default.
+      WORKERS: ${{ inputs.workers || '1' }}
+      RETRIES: '2'
+      HEADLESS: 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Resolve grep filter
+        id: filter
+        run: |
+          case "${{ inputs.suite || 'smoke' }}" in
+            smoke)      echo 'args=--grep @smoke'       >> "$GITHUB_OUTPUT" ;;
+            regression) echo 'args=--grep @regression'  >> "$GITHUB_OUTPUT" ;;
+            anomaly)    echo 'args=--grep @anomaly'     >> "$GITHUB_OUTPUT" ;;
+            data)       echo 'args=--grep @data-check'  >> "$GITHUB_OUTPUT" ;;
+            all)        echo 'args='                    >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Run tests
+        id: run
+        continue-on-error: true
+        run: npx playwright test ${{ steps.filter.outputs.args }}
+
+      - name: Build Slack summary
+        id: summary
+        if: always()
+        run: node scripts/slack-summary.mjs
+
+      - name: Upload HTML report
+        id: report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.run_number }}
+          path: reports/
+          retention-days: 30
+
+      - name: Post result to Slack
+        id: slack
+        if: always()
+        uses: slackapi/slack-github-action@v2
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "${{ inputs.slack_channel || vars.SLACK_DEFAULT_CHANNEL }}"
+            text: "${{ steps.summary.outputs.emoji }} QA Suite (${{ inputs.suite || 'smoke' }}): ${{ steps.summary.outputs.outcome }}"
+            blocks:
+              - type: section
+                text:
+                  type: mrkdwn
+                  text: "${{ steps.summary.outputs.emoji }} *QA Suite — ${{ inputs.suite || 'smoke' }}*\n${{ steps.summary.outputs.summary }}"
+              - type: context
+                elements:
+                  - type: mrkdwn
+                    text: "`${{ github.ref_name }}` · ${{ github.event_name }}${{ inputs.triggered_by && format(' · by {0}', inputs.triggered_by) || '' }}"
+              - type: actions
+                elements:
+                  - type: button
+                    text: { type: plain_text, text: "HTML report" }
+                    url: "${{ steps.report.outputs.artifact-url }}"
+                  - type: button
+                    text: { type: plain_text, text: "Run log" }
+                    url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Post failures as a thread reply
+        if: always() && steps.summary.outputs.failed_list != ''
+        uses: slackapi/slack-github-action@v2
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "${{ inputs.slack_channel || vars.SLACK_DEFAULT_CHANNEL }}"
+            thread_ts: "${{ steps.slack.outputs.ts }}"
+            text: "Failed specs"
+            blocks:
+              - type: section
+                text:
+                  type: mrkdwn
+                  text: "*Failed specs*\n${{ steps.summary.outputs.failed_list }}"
+
+      # Keep the job's own status honest: the test step used
+      # continue-on-error so that Slack always gets a message, so re-assert
+      # the real outcome here.
+      - name: Reflect test outcome
+        if: steps.run.outcome == 'failure'
+        run: |
+          echo "::error::Playwright reported failures — see the run log."
+          exit 1

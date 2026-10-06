@@ -1,0 +1,9 @@
+name = "qa-agent-slack-relay"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+# Non-secret config. Secrets go in with `wrangler secret put`, never here.
+[vars]
+GITHUB_REPO = "Kranti92/QA-Agent"
+WORKFLOW_FILE = "qa.yml"
+DEFAULT_REF = "main"
