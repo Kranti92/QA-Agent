@@ -7,165 +7,172 @@
 /qa help                usage
 ```
 
-The pipeline posts the result back into the same channel when it finishes,
-with pass/fail counts, any failed spec names, and buttons for the HTML report
-and the build log.
+CircleCI posts the result into the same channel when the run finishes, with
+pass/fail counts, any failed spec names, and buttons for the HTML report and
+the build log.
 
 ## How the pieces fit
 
 ```
-Slack  ──/qa──▶  Cloudflare Worker  ──API v2 pipeline──▶  CircleCI
-  ▲                 (verifies signature,                      │
-  │                  acks within 3s)                          │
-  └──────────── chat.postMessage ◀── curl in config.yml ───────┘
+Slack  ──/qa over WebSocket──▶  local-bot.mjs  ──API v2 pipeline──▶  CircleCI
+  ▲                              (on your machine)                       │
+  └──────────────── chat.postMessage ◀── curl in config.yml ─────────────┘
 ```
 
-**CircleCI is the primary runner.** `.github/workflows/qa.yml` is kept as a
-manually dispatchable fallback with its automatic triggers commented out —
-two CI systems running the same add-to-cart suite on one push share nothing
-except the storefront's 429 rate limit, and would trip it twice as fast.
+Two independent directions, which matters for what breaks when:
 
-Three things that are easy to get wrong before you start:
+| Direction | Runs where | Works when your machine is off? |
+|---|---|---|
+| `/qa` → start a run | `local-bot.mjs` on your machine | **No** |
+| run result → Slack | CircleCI, outbound HTTPS | **Yes** |
 
-- **Slack cannot call CI directly.** A slash command sends a form-encoded
-  body with Slack's own signature headers; neither CircleCI's nor GitHub's
-  API accepts that. The official GitHub Slack app only *subscribes* to
-  workflow events — it cannot dispatch them. Hence the Worker.
-- **Slack enforces a 3-second response.** The Worker acknowledges
-  immediately and the pipeline reports separately. A relay that waited for
-  the tests would time out every time.
-- **CircleCI pipeline parameters only arrive via an API trigger**, and they
-  must already be declared in `.circleci/config.yml` or the API returns 400.
-  Pushes and scheduled pipelines use the declared defaults.
+So notifications are never at risk from local hosting. Only the trigger is.
 
-## Why CircleCI here
+## Why Socket Mode
 
-Its artifacts are served as individual browsable files, so
-`reports/html/index.html` opens straight in the browser. GitHub Actions only
-offers a zip behind a login, which is painful on a phone — and since this
-repo is private, GitHub Pages is not an option either (that needs
-Enterprise). This sidesteps the problem rather than adding another host.
+Slack normally POSTs slash commands to a public HTTPS URL, which a laptop
+does not have. [Socket
+Mode](https://api.slack.com/apis/connections/socket) inverts that: the
+process opens an outbound WebSocket to Slack. Consequences:
+
+- **No public URL, no tunnel.** ngrok and friends are unnecessary — and a
+  free ngrok URL changes on restart, which would mean re-editing the Slack
+  app every time.
+- **No inbound firewall rule or port forward.**
+- **No request-signature verification.** The app-level token authenticates
+  the connection itself, so there is no unauthenticated endpoint to protect.
+- **No chicken-and-egg.** The app can be created before anything is running,
+  because the slash command needs no URL.
+
+The cost is uptime: `/qa` works only while the process runs. Slack shows the
+command as failed if the machine is asleep.
+
+`worker.js` is kept as an optional always-on alternative (Cloudflare Worker,
+HTTP slash command, signature verification required). It shares all its logic
+with the local bot via `lib.mjs`, so the two cannot drift.
 
 ## Setup
 
-Nothing below should be pasted into a chat window, a commit, or an issue.
+Nothing below belongs in a chat window, a commit, or an issue.
 
-### 1. Connect the project
+### 1. Create the app
 
-<https://app.circleci.com> → **Projects** → *Create Project* / *Set Up* for
-`Kranti92/QA-Agent` → pick the existing `.circleci/config.yml` on `main`.
+<https://api.slack.com/apps> → **Create New App** → **From a manifest** →
+paste [`manifest.yaml`](manifest.yaml) → **Install to Workspace**.
 
-### 2. CircleCI environment variables
+The manifest already sets `socket_mode_enabled: true` and declares `/qa`
+without a URL.
 
-*Project Settings → Environment Variables*:
+### 2. Collect two tokens
 
-| Name | Value |
-|---|---|
-| `SLACK_ACCESS_TOKEN` | Slack bot token, `xoxb-…` |
-| `SLACK_DEFAULT_CHANNEL` | channel id for pushes and scheduled runs, e.g. `C0123456789` |
+| Token | Where | Notes |
+|---|---|---|
+| `SLACK_BOT_TOKEN` | *OAuth & Permissions* | starts `xoxb-` |
+| `SLACK_APP_TOKEN` | *Basic Information → App-Level Tokens → Generate Token and Scopes* | starts `xapp-`, needs the **`connections:write`** scope |
 
-The channel **id** is under *channel name → About → scroll to the bottom* —
-not the `#name`. Invite the bot to that channel, or rely on
-`chat:write.public`.
+The app-level token must be generated by hand — Slack has no API for
+creating one. It is what authorises the WebSocket; the bot token is what
+posts messages.
 
-If `SLACK_ACCESS_TOKEN` is absent the notify step skips rather than failing,
-so you can set the pipeline up first and add Slack afterwards.
+You do **not** need the signing secret in Socket Mode.
 
-### 3. Slack app
+### 3. Configure
 
-1. <https://api.slack.com/apps> → **Create New App** → **From a manifest**
-2. Paste [`manifest.yaml`](manifest.yaml) — the slash-command URL is a
-   placeholder for now
-3. **Install to Workspace**
-4. Copy the **Bot User OAuth Token** (`xoxb-…`) → that is
-   `SLACK_ACCESS_TOKEN` above
-5. Copy the **Signing Secret** from *Basic Information* → used next
+Add to the gitignored `automation/.env`, alongside the `CIRCLE_TOKEN` the
+suite already uses:
 
-### 4. CircleCI API token
+```
+SLACK_BOT_TOKEN=xoxb-…
+SLACK_APP_TOKEN=xapp-…
+```
 
-*User Settings → Personal API Tokens* → create one. Scoped to your user, so
-treat it as a credential: it can trigger pipelines on every project you can
-see.
+Optionally restrict who may start runs:
 
-### 5. Deploy the relay
+```
+QA_ALLOWED_USERS=U01ABCDEF,U02GHIJKL
+```
+
+Left unset, anyone in the workspace who can see `/qa` can trigger CI. Fine
+for a private channel; worth setting in a shared one.
+
+### 4. Run it
 
 ```bash
 cd slack-bot
-npm install -g wrangler
-wrangler login
-
-wrangler secret put SLACK_SIGNING_SECRET
-wrangler secret put CIRCLE_TOKEN
-
-wrangler deploy
+npm install
+npm start
 ```
 
-`wrangler deploy` prints the Worker URL. Put it in the Slack app's
-*Slash Commands → /qa → Request URL*, save, and reinstall the app.
+It prints the project, branch and access mode, then waits. Leave it running.
 
-`wrangler.toml` already sets `PROVIDER = "circleci"` and
-`CIRCLE_PROJECT_SLUG = "gh/Kranti92/QA-Agent"`. Switching
-`PROVIDER` to `github` makes the same Worker drive GitHub Actions instead —
-it then reads `GITHUB_TOKEN`, `GITHUB_REPO` and `WORKFLOW_FILE`.
+### 5. CircleCI environment variables
+
+So the pipeline can post results back — *Project Settings → Environment
+Variables* on `gh/Kranti92/QA-Agent`:
+
+| Name | Value |
+|---|---|
+| `SLACK_ACCESS_TOKEN` | the same `xoxb-…` bot token |
+| `SLACK_DEFAULT_CHANNEL` | channel id for pushes and scheduled runs, e.g. `C0123456789` |
+
+A `/qa` run passes its own channel through, so `SLACK_DEFAULT_CHANNEL` only
+covers runs nobody asked for in Slack.
+
+If `SLACK_ACCESS_TOKEN` is absent the notify step skips instead of failing,
+so the pipeline can be green before Slack exists.
 
 ### 6. Nightly run
 
-*Project Settings → Triggers → Scheduled Pipeline*. Use a scheduled pipeline
-rather than the old in-config `triggers: schedule`, which is deprecated and
-cannot pass parameters. A scheduled pipeline can, so the nightly run can set
-`suite=all` while pushes stay on `smoke`.
+*Project Settings → Triggers → Scheduled Pipeline*, and **select `main`** —
+CircleCI misreports this repo's default branch as `master`, so a schedule
+left on the default silently never runs.
 
-Keep it daily. See below.
+Use a scheduled pipeline rather than the deprecated in-config
+`triggers: schedule`, which cannot pass pipeline parameters. A scheduled
+pipeline can, so nightly can run `suite=all` while pushes stay on `smoke`.
 
-### 7. First run
+## Keeping it running
 
-Trigger once from the CircleCI UI before trying `/qa` — that separates
-pipeline problems from relay problems.
+`npm start` dies with the terminal. For something longer-lived on Windows:
 
-## The constraint that shapes all of this
+- **Quick**: leave it in a dedicated terminal tab.
+- **Durable**: wrap it with [PM2](https://pm2.keymetrics.io/)
+  (`pm2 start local-bot.mjs --name qa-bot && pm2 save`), or register it as a
+  Windows service with [NSSM](https://nssm.cc/).
+
+Either way it stops when the machine sleeps. If `/qa` needs to work
+round-the-clock, deploy `worker.js` instead.
+
+## The constraint that shapes the suite
 
 The storefront rate-limits `POST /cart/add.js` with HTTP 429
-(`too_many_requests`), and once tripped it stays tripped for several minutes.
-CI runners share outbound IPs, so this bites sooner there than on a laptop.
+(`too_many_requests`) **per source IP**, and once tripped it stays tripped
+for several minutes.
 
-Accordingly:
+Verified 2026-10-06: a local machine stayed throttled for over an hour while
+CircleCI ran the full 38-test suite twice with no 429 at all. So a throttled
+laptop does not mean a throttled pipeline — and never poll `/cart/add.js` to
+check whether the limit lifted, because each probe is another add attempt
+that restarts the window.
 
-- `workers` defaults to **1** in CI, and the Worker caps it at 4
-- the schedule is daily, not hourly
-- only one CI system runs the suite automatically
-- `scripts/slack-summary.mjs` recognises the 429 signature and reports the
-  run as *throttled* with an hourglass, keeping it distinct from a product
-  regression
-
-If every add-to-cart test fails at once, check this before reading the diff:
-
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" -X POST \
-  "https://sauce-demo.myshopify.com/cart/add.js" -d "id=611951029&quantity=1"
-```
-
-## Hardening worth doing before this reaches a shared channel
-
-- **Restrict who can trigger runs.** Check `user_id` against an allowlist, or
-  at least `team_id`. As written, anyone in the workspace who can see `/qa`
-  can start a pipeline.
-- **Rate-limit the Worker**, so nobody can queue fifty runs.
-- **Rotate the CircleCI and Slack tokens** on a schedule, and keep them out
-  of `wrangler.toml` — `wrangler secret put` stores them encrypted, the TOML
-  file is committed.
+Accordingly: `workers` defaults to 1 in CI and the bot caps it at 4; the
+schedule is daily; only CircleCI runs the suite automatically; and
+`scripts/slack-summary.mjs` recognises the 429 signature and reports the run
+as *throttled* with an hourglass, distinct from a product regression.
 
 ## Local checks
 
-The notification path is testable without CI:
+The notification payload is testable without CI or Slack:
 
 ```bash
+cd ..
 npx playwright test tests/dataIntegrity.spec.ts   # writes reports/results.json
 node scripts/slack-summary.mjs --stdout           # human-readable
 CIRCLE_BUILD_URL=https://circleci.com/x/1 CIRCLE_BRANCH=main \
   SUITE=smoke SLACK_CHANNEL=C123 \
-  node scripts/slack-summary.mjs --payload        # exact Slack body
+  node scripts/slack-summary.mjs --payload        # the exact Slack body
 ```
 
 Do not pass `--reporter` to `playwright test`: it **replaces** the reporters
-configured in `playwright.config.ts`, so `reports/results.json` never gets
+configured in `playwright.config.ts`, so `reports/results.json` is never
 written and the summary has nothing to read.

@@ -1,0 +1,20 @@
+{
+  "name": "qa-agent-slack-relay",
+  "version": "1.0.0",
+  "description": "Slack /qa bot. Socket Mode locally (local-bot.mjs); optional Cloudflare Worker (worker.js).",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail",
+    "start": "node local-bot.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.147.0"
+  },
+  "dependencies": {
+    "@slack/bolt": "^5.1.0",
+    "dotenv": "^18.0.5"
+  },
+  "main": "local-bot.mjs"
+}

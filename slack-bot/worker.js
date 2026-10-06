@@ -1,187 +1,93 @@
 /**
- * Slack -> CI relay (Cloudflare Worker). Supports CircleCI and GitHub Actions.
+ * OPTIONAL hosted alternative to local-bot.mjs.
  *
- * Why this exists: a Slack slash command POSTs a form-encoded body with its
- * own signature headers. Neither CircleCI's nor GitHub's API accepts that,
- * and the official GitHub Slack app can only *subscribe* to workflow events —
- * it cannot dispatch them. So something has to translate, and it has to be
- * reachable from the internet.
+ * `local-bot.mjs` (Socket Mode, runs on your machine) is the active path and
+ * needs no hosting. This file exists for the case where `/qa` must work while
+ * your machine is off — a Cloudflare Worker is always on.
  *
- * Flow:
- *   /qa smoke  ->  verify Slack signature
- *              ->  trigger the pipeline
- *              ->  reply within 3s so Slack does not show a timeout
- *   ...the pipeline itself posts the result later via chat.postMessage.
+ * Unlike Socket Mode, an HTTP slash command is an unauthenticated public
+ * endpoint, so verifying Slack's request signature is mandatory here.
  *
  * Secrets (wrangler secret put <NAME>):
- *   SLACK_SIGNING_SECRET  from the Slack app's Basic Information page
+ *   SLACK_SIGNING_SECRET  Slack app -> Basic Information
  *   CIRCLE_TOKEN          CircleCI personal API token   (PROVIDER=circleci)
  *   GITHUB_TOKEN          fine-grained PAT, Actions: write (PROVIDER=github)
  *
- * Vars (wrangler.toml):
- *   PROVIDER              circleci | github
- *   DEFAULT_REF           main
- *   CIRCLE_PROJECT_SLUG   e.g. gh/Kranti92/QA-Agent
- *   GITHUB_REPO           e.g. Kranti92/QA-Agent
- *   WORKFLOW_FILE         qa.yml
+ * Vars live in wrangler.toml. Deploy with `npm run deploy`.
+ *
+ * Note: the app manifest sets socket_mode_enabled: true and gives the slash
+ * command no URL. To use this Worker instead, turn Socket Mode off and set
+ * the command's Request URL to the deployed Worker URL.
  */
+import {
+  parseCommand,
+  dispatchCircleCI,
+  dispatchGitHub,
+  ackText,
+} from './lib.mjs';
 
-const SUITES = ['smoke', 'regression', 'anomaly', 'data', 'all'];
 const MAX_SKEW_SECONDS = 60 * 5;
 
 export default {
   async fetch(request, env) {
-    if (request.method !== 'POST') {
-      return new Response('POST only', { status: 405 });
-    }
+    if (request.method !== 'POST') return new Response('POST only', { status: 405 });
 
     const raw = await request.text();
 
-    const verification = await verifySlack(request, raw, env.SLACK_SIGNING_SECRET);
-    if (!verification.ok) {
-      // Do not leak which check failed.
-      console.log('rejected slack request:', verification.reason);
+    const check = await verifySlack(request, raw, env.SLACK_SIGNING_SECRET);
+    if (!check.ok) {
+      // Log the reason, but do not tell the caller which check failed.
+      console.log('rejected slack request:', check.reason);
       return new Response('unauthorized', { status: 401 });
     }
 
     const form = new URLSearchParams(raw);
-    const text = (form.get('text') ?? '').trim();
     const userName = form.get('user_name') ?? 'someone';
     const channelId = form.get('channel_id') ?? '';
 
-    const { suite, workers, error } = parseCommand(text);
-    if (error) {
-      return ephemeral(error);
-    }
+    const { suite, workers, error } = parseCommand(form.get('text') ?? '');
+    if (error) return ephemeral(error);
 
-    const trigger =
-      (env.PROVIDER ?? 'circleci') === 'github' ? dispatchGitHub : dispatchCircleCI;
+    const useGitHub = env.PROVIDER === 'github';
+    const cfg = useGitHub
+      ? {
+          token: env.GITHUB_TOKEN,
+          repo: env.GITHUB_REPO,
+          workflowFile: env.WORKFLOW_FILE,
+          ref: env.DEFAULT_REF,
+        }
+      : {
+          token: env.CIRCLE_TOKEN,
+          projectSlug: env.CIRCLE_PROJECT_SLUG,
+          ref: env.DEFAULT_REF,
+        };
 
     try {
-      await trigger(env, { suite, workers, channelId, userName });
+      const pipeline = await (useGitHub ? dispatchGitHub : dispatchCircleCI)(cfg, {
+        suite,
+        workers,
+        channelId,
+        userName,
+      });
+
+      return Response.json({
+        response_type: 'in_channel',
+        text: ackText({ userName, suite, workers, pipelineNumber: pipeline.number }),
+      });
     } catch (err) {
       console.log('dispatch failed:', err.message);
       return ephemeral(
         `Could not start the run: ${err.message}\n` +
-          'Check the relay logs, and that the CI config exists on the default branch.',
+          'Check the relay logs, and that the CI config is on the default branch.',
       );
     }
-
-    // In-channel so the team sees who kicked it off; the workflow's own
-    // message lands in the same channel when it finishes.
-    return Response.json({
-      response_type: 'in_channel',
-      text:
-        `:rocket: *${userName}* started the *${suite}* suite ` +
-        `(${workers} worker${workers === '1' ? '' : 's'}). Results will post here.`,
-    });
   },
 };
 
-/** `/qa`, `/qa regression`, `/qa regression 2`, `/qa help` */
-function parseCommand(text) {
-  if (text === 'help' || text === '?') {
-    return {
-      error:
-        '*Usage:* `/qa [suite] [workers]`\n' +
-        `*Suites:* ${SUITES.map((s) => `\`${s}\``).join(', ')} (default \`smoke\`)\n` +
-        '*Workers:* 1–4, default 1. Keep it low — the storefront rate-limits ' +
-        '`/cart/add.js` with HTTP 429 and hosted runners share egress IPs.',
-    };
-  }
-
-  const [rawSuite = 'smoke', rawWorkers = '1'] = text.split(/\s+/).filter(Boolean);
-
-  const suite = rawSuite.toLowerCase();
-  if (!SUITES.includes(suite)) {
-    return {
-      error: `Unknown suite \`${rawSuite}\`. Pick one of ${SUITES.map((s) => `\`${s}\``).join(', ')}, or run \`/qa help\`.`,
-    };
-  }
-
-  const workersNum = Number(rawWorkers);
-  if (!Number.isInteger(workersNum) || workersNum < 1 || workersNum > 4) {
-    return { error: `\`workers\` must be a whole number from 1 to 4, got \`${rawWorkers}\`.` };
-  }
-
-  return { suite, workers: String(workersNum) };
-}
-
 /**
- * CircleCI API v2 pipeline trigger.
- *
- * Pipeline parameters must already be declared in .circleci/config.yml or
- * CircleCI rejects the request — that is the usual cause of a 400 here.
- */
-async function dispatchCircleCI(env, { suite, workers, channelId, userName }) {
-  const slug = env.CIRCLE_PROJECT_SLUG;
-  if (!slug) throw new Error('CIRCLE_PROJECT_SLUG is not configured');
-
-  const response = await fetch(
-    `https://circleci.com/api/v2/project/${slug}/pipeline`,
-    {
-      method: 'POST',
-      headers: {
-        'Circle-Token': env.CIRCLE_TOKEN,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        branch: env.DEFAULT_REF ?? 'main',
-        parameters: {
-          suite,
-          workers,
-          slack_channel: channelId,
-          triggered_by: userName,
-        },
-      }),
-    },
-  );
-
-  // 201 Created is the success case for a pipeline trigger.
-  if (response.status !== 201) {
-    const body = await response.text();
-    throw new Error(`CircleCI returned ${response.status}: ${body.slice(0, 200)}`);
-  }
-}
-
-async function dispatchGitHub(env, { suite, workers, channelId, userName }) {
-  const url =
-    `https://api.github.com/repos/${env.GITHUB_REPO}` +
-    `/actions/workflows/${env.WORKFLOW_FILE}/dispatches`;
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-      'User-Agent': 'qa-agent-slack-relay',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      ref: env.DEFAULT_REF ?? 'main',
-      inputs: {
-        suite,
-        workers,
-        slack_channel: channelId,
-        triggered_by: userName,
-      },
-    }),
-  });
-
-  // 204 No Content is the success case for workflow_dispatch.
-  if (response.status !== 204) {
-    const body = await response.text();
-    throw new Error(`GitHub returned ${response.status}: ${body.slice(0, 200)}`);
-  }
-}
-
-/**
- * Verifies Slack's request signature.
- *
- * Without this, anyone who learns the Worker URL can trigger your CI. The
- * timestamp check is what stops a captured request being replayed later.
+ * Verifies Slack's request signature. Without it, anyone who learns the
+ * Worker URL can trigger CI. The timestamp check is what stops a captured
+ * request being replayed later.
  */
 async function verifySlack(request, rawBody, signingSecret) {
   if (!signingSecret) return { ok: false, reason: 'no signing secret configured' };
@@ -208,15 +114,14 @@ async function verifySlack(request, rawBody, signingSecret) {
     new TextEncoder().encode(`v0:${timestamp}:${rawBody}`),
   );
   const expected =
-    'v0=' +
-    [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, '0')).join('');
+    'v0=' + [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, '0')).join('');
 
   return timingSafeEqual(expected, signature)
     ? { ok: true }
     : { ok: false, reason: 'signature mismatch' };
 }
 
-/** Constant-time compare, so the response time cannot be used to guess bytes. */
+/** Constant-time compare, so response timing cannot be used to guess bytes. */
 function timingSafeEqual(a, b) {
   if (a.length !== b.length) return false;
   let diff = 0;

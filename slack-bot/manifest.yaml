@@ -1,10 +1,11 @@
 # Slack app manifest for the QA bot.
 #
-# Create the app from this file instead of clicking through the UI:
-#   https://api.slack.com/apps  ->  Create New App  ->  From a manifest
+# Socket Mode is enabled, so the app connects out to Slack over a WebSocket
+# and needs no public URL — which is why the slash command below has no
+# `url`. That is what makes it runnable from a laptop.
 #
-# Replace REPLACE_WITH_WORKER_URL with the URL `wrangler deploy` prints,
-# then reinstall the app so the slash command picks it up.
+# Create the app from this file rather than clicking through the UI:
+#   https://api.slack.com/apps  ->  Create New App  ->  From a manifest
 display_information:
   name: QA Agent
   description: Run and report the Sauce Demo storefront Playwright suite
@@ -16,7 +17,6 @@ features:
     always_online: false
   slash_commands:
     - command: /qa
-      url: REPLACE_WITH_WORKER_URL
       description: Run the QA suite
       usage_hint: '[smoke|regression|anomaly|data|all] [workers]'
       should_escape: false
@@ -24,14 +24,20 @@ features:
 oauth_config:
   scopes:
     bot:
-      # chat:write      — post run results
-      # chat:write.public — post into channels the bot has not been invited to
-      # commands        — receive /qa
+      # chat:write        — post run results and the start acknowledgement
+      # chat:write.public — post into channels the bot was not invited to
+      # commands          — receive /qa
+      # channels:read     — resolve a channel name to its id, and check the
+      #                     bot's membership. Read-only on public channel
+      #                     metadata; it does not grant message history.
       - chat:write
       - chat:write.public
       - commands
+      - channels:read
 
 settings:
   org_deploy_enabled: false
-  socket_mode_enabled: false
+  # Outbound WebSocket instead of inbound HTTP. No tunnel, no signature
+  # verification, no hosting.
+  socket_mode_enabled: true
   token_rotation_enabled: false
