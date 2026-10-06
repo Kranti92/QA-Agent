@@ -147,4 +147,40 @@ test.describe('Cart', () => {
     await expect(cartPage.line('Grey jacket - Grey jacket')).toBeVisible();
     expect(cartLabel(product)).toBe('Grey jacket - Grey jacket');
   });
+
+  test('@regression desktop cart icon opens drawer without navigating away', async ({
+    openProduct,
+    page,
+  }) => {
+    // SDEMO-1 AC9 — the desktop cart toggle (href="#") must not navigate.
+    // Pins the quirk documented in Header.ts so it is not accidentally treated
+    // as a /cart navigation by future automation or theme changes.
+    const pdp = await openProduct(SIMPLE_PRODUCT);
+    await pdp.addToCart();
+
+    const pathBefore = pdp.currentPath();
+    await pdp.header.drawerToggle.click();
+
+    expect(pdp.currentPath()).toBe(pathBefore);
+    // Guard: the drawer toggle must not have navigated to /cart.
+    expect(pdp.currentPath()).not.toBe('/cart');
+  });
+
+  test('@regression empty cart shows continue-shopping link that returns to catalog', async ({
+    openProduct,
+    cartPage,
+  }) => {
+    // SDEMO-1 AC10 — after the last line is removed, the empty-cart state must
+    // offer a continue-shopping link that routes back to the catalog. Extends
+    // the remove-and-empty test, which stops at the empty-state copy.
+    const product = SIMPLE_PRODUCT;
+
+    await (await openProduct(product)).addToCartAndViewCart();
+    await cartPage.removeLine(cartLabel(product));
+
+    await expect(cartPage.emptyMessage).toBeVisible();
+    await expect(cartPage.continueShoppingLink).toBeVisible();
+    const href = await cartPage.continueShoppingLink.getAttribute('href');
+    expect(href).toContain('/collections/all');
+  });
 });

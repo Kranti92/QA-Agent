@@ -77,4 +77,19 @@ test.describe('Catalog', () => {
 
     expect(PRODUCTS.blackHeels.handle).not.toBe('black-heels');
   });
+
+  test('@regression catalog card click navigates to the correct PDP', async ({
+    catalogPage,
+  }) => {
+    // SDEMO-1 AC3 — clicking the card must navigate, not just read the href.
+    // Uses Black heels (anomaly A2) to verify the URL resolves to the real
+    // handle (/products/flower-print-jeans), not a slug derived from the title.
+    const product = PRODUCTS.blackHeels;
+
+    await catalogPage.open();
+    const pdp = await catalogPage.openProduct(product.title);
+
+    expect(pdp.currentPath()).toBe(`/products/${product.handle}`);
+    await expect(pdp.title).toHaveText(product.title);
+  });
 });
