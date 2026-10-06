@@ -130,7 +130,18 @@ jobs:
             echo "Suite passed."
 
 workflows:
-  # Runs on every push, and on an API trigger from the Slack relay.
+  # Runs on a push to main, or on ANY explicit API trigger (qa-runner,
+  # the Slack relay, or a manual trigger) regardless of branch.
+  #
+  # Deliberately does NOT run automatically on a push to any other branch.
+  # Found 2026-10-06: with no condition here at all, CircleCI's own push
+  # webhook auto-triggered a full pipeline on every `git push` to a ticket
+  # branch (qa/SDEMO-4), IN ADDITION TO qa-runner's own explicit API
+  # trigger moments later for that same push/commit - two pipelines
+  # fighting over one concurrency slot, both left stuck in "pending". The
+  # push-triggered one carries no pipeline parameters (triggered_by is
+  # always its default, ""), which is what the condition below checks for
+  # - an explicit trigger always sets a real value, a bare push never does.
   #
   # For a nightly run, add a Scheduled Pipeline in the CircleCI UI
   # (Project Settings -> Triggers) rather than the old in-config
@@ -141,5 +152,10 @@ workflows:
   # Keep it daily, not hourly: repeated add-to-cart runs trip the
   # storefront's 429 rate limit.
   qa:
+    when:
+      or:
+        - equal: [main, << pipeline.git.branch >>]
+        - not:
+            equal: ['', << pipeline.parameters.triggered_by >>]
     jobs:
       - test
