@@ -61,7 +61,9 @@ export class CartPage extends BasePage {
     this.updateButton = this.section.locator('input#update');
     this.checkoutButton = this.section.locator('input#checkout');
     this.noteField = this.section.locator('textarea#note');
-    this.continueShoppingLink = this.section.locator('div.continue-shopping a');
+    // Empty-cart state: link is inside a <p>, not div.continue-shopping (which only
+    // exists in the non-empty totals row). Role-based match works in both states.
+    this.continueShoppingLink = this.section.getByRole('link', { name: /continue shopping/i });
   }
 
   async isEmpty(): Promise<boolean> {
