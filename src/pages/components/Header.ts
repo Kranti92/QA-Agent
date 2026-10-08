@@ -20,6 +20,7 @@ export class Header {
   readonly checkoutLink: Locator;
   readonly searchField: Locator;
   readonly searchSubmit: Locator;
+  readonly aboutUsLink: Locator;
 
   constructor(private readonly page: Page) {
     this.logo             = page.locator('h1#logo a');
@@ -32,6 +33,7 @@ export class Header {
     this.checkoutLink     = page.locator('#minicart a.checkout');
     this.searchField      = page.locator('input#search-field');
     this.searchSubmit     = page.locator('input#search-submit');
+    this.aboutUsLink      = page.locator('#main-menu a[href="/pages/about-us"]');
   }
 
   /** Parses the "(n)" counter into a number. */
@@ -62,6 +64,11 @@ export class Header {
   /** Navigates to /cart using the only header link that actually routes there. */
   async goToCart(): Promise<void> {
     await this.checkoutLink.click();
+    await this.page.waitForLoadState('domcontentloaded');
+  }
+
+  async goToAboutUs(): Promise<void> {
+    await this.aboutUsLink.click();
     await this.page.waitForLoadState('domcontentloaded');
   }
 }
