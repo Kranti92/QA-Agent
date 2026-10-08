@@ -77,4 +77,23 @@ test.describe('Catalog', () => {
 
     expect(PRODUCTS.blackHeels.handle).not.toBe('black-heels');
   });
+
+  test('@regression site logo navigates back to Home from the Catalog page', async ({
+    homePage,
+    catalogPage,
+  }) => {
+    // SDEMO-7 AC2/AC3/AC4 — the shared header logo (h1#logo a), not the
+    // breadcrumb or any other Home-pointing control, must perform the
+    // navigation. See SDEMO-6's navigation.spec.ts for the same assertion
+    // starting from the Blog page instead.
+    await homePage.open();
+    await homePage.header.goToCatalog();
+
+    expect(catalogPage.currentPath()).toBe('/collections/all');
+    await expect(catalogPage.header.logo).toBeVisible();
+
+    await catalogPage.header.logo.click();
+
+    expect(catalogPage.currentPath()).toBe('/');
+  });
 });
