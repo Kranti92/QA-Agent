@@ -3,6 +3,7 @@ import { CatalogPage } from '@pages/CatalogPage';
 import { CartPage } from '@pages/CartPage';
 import { HomePage } from '@pages/HomePage';
 import { ProductPage } from '@pages/ProductPage';
+import { BlogPage } from '@pages/BlogPage';
 import { StorefrontApi } from '@utils/storefrontApi';
 import { logger } from '@utils/logger';
 import type { Product } from '@models/Product';
@@ -11,6 +12,7 @@ type UiFixtures = {
   homePage: HomePage;
   catalogPage: CatalogPage;
   cartPage: CartPage;
+  blogPage: BlogPage;
 
   /** Builds a PDP page object without navigating. */
   productPage: (product: Product | string) => ProductPage;
@@ -48,6 +50,10 @@ export const test = base.extend<UiFixtures>({
 
   cartPage: async ({ page }, use) => {
     await use(new CartPage(page));
+  },
+
+  blogPage: async ({ page }, use) => {
+    await use(new BlogPage(page));
   },
 
   productPage: async ({ page }, use) => {
